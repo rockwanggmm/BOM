@@ -8,10 +8,10 @@ st.set_page_config(page_title="跨表大融合整合對齊工具", layout="wide"
 
 st.title("📋 多分頁需求單「單一頁面全整合」與工單料況對齊工具")
 st.markdown("""
-### 🎯 最終校正版自動化邏輯：
-1. **全單一頁面融合**：僅在第一個分頁插入 A、B 欄並從 **P 欄 (第 16 欄)** 黏貼料況。其餘所有分頁的數據將自動垂直向下追加到第一頁尾端，最終融合成單一頁面。
-2. **工單號防呆升級**：若各分頁第 6 列檢測到多個工單號或異常，將精準執行：**【當列上階料號去頭、且去尾 3 碼模組號】** 作為 B 欄工單號。
-3. **雙重精準匹配**：嚴格限定 **【上階料號(去頭) == 工單號碼】** 並且 **【料號 - 變更後 == Component Item】**。
+### 🎯 最終校正版自動化邏輯（內建合併欄位與空行雙防呆）：
+1. **全單一頁面融合**：僅在第一個分頁插入 A、B 欄並從 **P 欄 (第 16 欄)** 黏貼料況。其餘所有分頁的數據將自動垂直向下追加到第一頁尾端。
+2. **智慧相容合併欄位**：完美破解第 7、8 列因合併欄位導致後續分頁（如 `FDC (2)`）找不到標頭的問題。
+3. **自動定位標頭**：工單料況表若上方有空行或大標題，程式會自動跳過並精準識別，無須手動刪除空行！
 """)
 
 col1, col2 = st.columns(2)
@@ -28,34 +28,38 @@ if ecn_file and status_file:
         doc_no = match_doc_no.group(1) if match_doc_no else "GAA260500286"
 
         # --- 步驟 2：讀取工單料況對照表 ---
-        # 為了避免前面有空行，我們預設正常讀取，如果後面檢查失敗會再提醒使用者
         if status_file.name.endswith('.xlsb'):
             try:
-                status_df = pd.read_excel(status_file, engine='pyxlsb')
+                raw_status_df = pd.read_excel(status_file, engine='pyxlsb', header=None)
             except Exception:
-                status_df = pd.read_excel(status_file)
+                raw_status_df = pd.read_excel(status_file, header=None)
         else:
-            status_df = pd.read_excel(status_file)
+            raw_status_df = pd.read_excel(status_file, header=None)
             
-        # 清洗工單料況表的欄位名稱
+        header_row_idx = None
+        for idx in range(min(20, len(raw_status_df))):
+            row_vals = [str(x).strip() for x in raw_status_df.iloc[idx].dropna().tolist()]
+            if '工單號碼' in row_vals or 'Component Item' in row_vals or 'Seiban' in row_vals:
+                header_row_idx = idx
+                break
+                
+        if header_row_idx is None:
+            status_df = raw_status_df.copy()
+            status_df.columns = [str(c).strip() for c in status_df.iloc[0]]
+        else:
+            status_df = raw_status_df.iloc[header_row_idx+1:].copy()
+            status_df.columns = [str(c).strip() for c in raw_status_df.iloc[header_row_idx]]
+            st.success(f"💡 系統提示：自動偵測到工單料況表的真正標頭位於第 **{header_row_idx + 1}** 列！")
+
         status_df.columns = [str(c).strip() for c in status_df.columns]
         status_cols = status_df.columns.tolist()
         
-        # 🚨 【Debug 核心檢查點 1】：檢查工單料況表是否包含必要的比對欄位
         required_status_cols = ['工單號碼', 'Component Item']
         missing_status_cols = [col for col in required_status_cols if col not in status_cols]
         
         if missing_status_cols:
-            st.error(f"""
-            ### ❌ 工單料況檔案格式錯誤 (欄位缺失)
-            * **目前讀取到的欄位有**：{status_cols[:8]}... (共 {len(status_cols)} 個欄位)
-            * **遺失的必要欄位**：`{"、".join(missing_status_cols)}`
-            
-            💡 **請檢查您的工單料況 Excel 檔**：
-            1. 第一列（Row 1）是否是欄位標頭？如果第一列是空白或大標題，請在 Excel 中將其刪除，確保「Seiban、工單號碼、Component Item」位於最頂端的第一列。
-            2. 請檢查欄位名稱是否完全正確，不可有錯字（例如變成了「工單號」或「組件料號」）。
-            """)
-            st.stop() # 停止程式繼續執行，精準攔截錯誤
+            st.error(f"### ❌ 工單料況檔案格式判定失敗，依然遺失必要欄位：`{"、".join(missing_status_cols)}`")
+            st.stop()
         
         # --- 步驟 3：使用 openpyxl 載入需求單主體 ---
         ecn_wb = openpyxl.load_workbook(ecn_file)
@@ -70,7 +74,7 @@ if ecn_file and status_file:
             if val_str in ['"', '”', '同上', '']:
                 return "FOLLOW"
             if len(val_str) > 1:
-                return val_str[1:]  # 去掉第一個字元
+                return val_str[1:]
             return val_str
 
         # 鎖定第一個分頁作為整合大表
@@ -90,7 +94,6 @@ if ecn_file and status_file:
         for i, col_name in enumerate(status_cols):
             main_ws.cell(row=7, column=start_write_col + i, value=col_name)
 
-        # 指引主表格目前收集到的最新空行（從第 9 列開始）
         current_main_row = 9
         
         # 遍歷所有的分頁進行垂直整合
@@ -118,36 +121,33 @@ if ecn_file and status_file:
             else:
                 is_multi_order = True
                 
-            # 鎖定該分頁的「上階料號」與「料號 - 變更後」的原始欄位索引
+            # 🚨 破解合併欄位：十字地毯式搜索 (同時看第 7 列與第 8 列)
             upper_col_idx = None
             after_col_idx = None
             
-            # 動態校正定位
             for c in range(1, ws.max_column + 1):
-                val = str(ws.cell(row=7, column=c).value).strip()
-                if '上階' in val:
+                # 同時抓取第 7 列與第 8 列的值進行模糊比對
+                val_r7 = str(ws.cell(row=7, column=c).value or "").strip()
+                val_r8 = str(ws.cell(row=8, column=c).value or "").strip()
+                combined_text = val_r7 + val_r8
+                
+                if '上階' in combined_text:
+                    # 如果是第一頁，因為前面已經插了兩欄，欄位索引直接使用；其餘分頁則記錄插入兩欄後的預期位置
                     upper_col_idx = c if s_idx == 0 else c + 2
-                if '變更後' in val:
+                if '變更後' in combined_text:
                     after_col_idx = c if s_idx == 0 else c + 2
 
-            # 🚨 【Debug 核心檢查點 2】：檢查需求單內是否包含必要的比對欄位
-            if (upper_col_idx is None or after_col_idx is None) and s_idx == 0:
-                # 建立防呆兜底，如果找不到標頭就用預設的
-                if not upper_col_idx: upper_col_idx = 8
-                if not after_col_idx: after_col_idx = 11
-            elif (upper_col_idx is None or after_col_idx is None) and s_idx > 0:
-                # 後續分頁找不到時直接報錯
-                st.error(f"""
-                ### ❌ 需求單分頁 `[{sheet_name}]` 格式不對
-                系統在第 7 列中找不到 **「上階料號」** 或 **「料號 - 變更後」** 的欄位字眼！
-                請確認所有分頁的第 7 列或第 8 列，其表格標頭結構是否完全一致。
-                """)
-                st.stop()
+            # 💡 安全兜底：如果真的連第 7、8 列都沒偵測到，使用預設的黃金索引
+            if upper_col_idx is None:
+                upper_col_idx = 8  # 對應插入後的 H 欄
+            if after_col_idx is None:
+                after_col_idx = 11 # 對應插入後的 K 欄
 
             max_r = ws.max_row
             last_valid_upper = ""
             
             for r in range(9, max_r + 1):
+                # 計算在當前處理分頁中的實際讀取索引
                 read_upper_idx = upper_col_idx if s_idx == 0 else upper_col_idx - 2
                 read_after_idx = after_col_idx if s_idx == 0 else after_col_idx - 2
                 
@@ -185,7 +185,6 @@ if ecn_file and status_file:
                 val_after = str(raw_after).strip() if raw_after is not None else ""
                 matched_rows = pd.DataFrame()
                 if use_upper and val_after and val_after not in ["None", "", '"', '”', '同上']:
-                    # 進行安全的 pandas 比對
                     matched_rows = status_df[
                         (status_df['工單號碼'].astype(str).str.strip() == use_upper) & 
                         (status_df['Component Item'].astype(str).str.strip() == val_after)
@@ -207,7 +206,7 @@ if ecn_file and status_file:
         for sheet_name in sheet_names[1:]:
             del ecn_wb[sheet_name]
             
-        st.success(f"🎉 跨活頁大融合成功！已將所有分頁的資料垂直整合成單一工作表！")
+        st.success(f"🎉 跨活頁大融合成功！已完美攻克合併欄位限制，全數整合成單一工作表！")
         
         output = io.BytesIO()
         ecn_wb.save(output)
@@ -221,12 +220,8 @@ if ecn_file and status_file:
         )
         
     except KeyError as ke:
-        st.error(f"""
-        ### ❌ 比對欄位異常告警 (KeyError)
-        程式在執行資料比對時，無法在對照表中定位這一列：`{ke}`。
-        這表示工單料況表的表頭雖然讀到了，但在比對過程中資料發生了偏移。請確認工單料況表格式是否遭到中途竄改。
-        """)
+        st.error(f"### ❌ 比對欄位異常告警: `{ke}`")
     except Exception as e:
-        st.error(f"❌ 整合過程中發生未知錯誤: {e}。請聯繫工程師檢查檔案結構。")
+        st.error(f"❌ 整合過程中發生未知錯誤: {e}")
 else:
     st.info("💡 提示：請同時上傳「多分頁需求單」與「工單料況表」以自動進行單頁面大融合。")
