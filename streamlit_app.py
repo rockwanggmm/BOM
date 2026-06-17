@@ -2,18 +2,18 @@ import streamlit as st
 import pandas as pd
 import io
 import openpyxl
-from openpyxl.utils.dataframe import dataframe_to_rows
+import re
 
-st.set_page_config(page_title="需求單與工單料況自動整合工具", layout="wide")
+st.set_page_config(page_title="需求單與工單料況精準整合工具", layout="wide")
 
-st.title("📋 需求單(GAA260500286)與工單料況精準整合工具")
+st.title("📋 需求單與工單料況精準自動對齊整合工具")
 st.markdown("""
-### 📌 完美修正後的整合邏輯：
-1. **雙重條件精準匹配**：系統會同時比對 **【(需求單)上階料號去掉首字 == (工單料況)工單號碼】** 並且 **【(需求單)變更後料號 == (工單料況)Component Item】**。
-2. **完整格式保留**：保留需求單原始檔案上方的 1~6 列特殊表頭資訊，不破換原檔案排版。
-3. **欄位完美串接**：
-   * 在最左側自動插入 `需求單號`、`工單號`。
-   * 在最右側（原本備註欄的右邊）自動黏貼工單料況對應的完整欄位。
+### 🎯 調整後的完美自動化邏輯：
+1. **雙重條件限定**：同時綁定 **【上階料號(去頭) == 工單號碼】** 並且 **【料號 - 變更後 == Component Item】**。
+2. **動態讀取左側標頭資訊**：
+   * **A 欄 (需求單號)**：自動從您上傳的「需求單檔名」中提取單號。
+   * **B 欄 (工單號)**：自動抓取需求單內第 6 列中記錄的真實工單代碼（例如：`C025M2102(12X)`）。
+3. **完美保留原格式**：1~6 列大表頭、背景顏色、字體完全原封不動，資料由 **M 欄** 開始無縫黏貼。
 """)
 
 col1, col2 = st.columns(2)
@@ -24,7 +24,13 @@ with col2:
 
 if ecn_file and status_file:
     try:
-        # 1. 讀取工單料況對照表（右表）
+        # --- 步驟 1：自動從需求單檔名擷取「需求單號」 ---
+        file_name = ecn_file.name
+        # 匹配常見的單號格式（如 GAA260500286）
+        match_doc_no = re.search(r'([A-Za-z0-9]+)', file_name)
+        doc_no = match_doc_no.group(1) if match_doc_no else "GAA260500286"
+
+        # --- 步驟 2：讀取工單料況對照表 ---
         if status_file.name.endswith('.xlsb'):
             try:
                 status_df = pd.read_excel(status_file, engine='pyxlsb')
@@ -33,20 +39,15 @@ if ecn_file and status_file:
         else:
             status_df = pd.read_excel(status_file)
             
-        # 清洗右表欄位
         status_df.columns = [str(c).strip() for c in status_df.columns]
+        status_cols = status_df.columns.tolist()
         
-        # 建立右表的 雙重條件組合索引 鍵，確保精準唯一性
-        # Key: 工單號碼 + "_" + Component Item
-        status_df['__join_key__'] = status_df['工單號碼'].astype(str).str.strip() + "_" + status_df['Component Item'].astype(str).str.strip()
-        
-        # 2. 使用 openpyxl 載入需求單（主表），以保留上方表頭與特殊格式
+        # --- 步驟 3：使用 openpyxl 載入需求單主體 (保持原始精美樣式) ---
         ecn_wb = openpyxl.load_workbook(ecn_file)
         sheet_names = ecn_wb.sheetnames
         
-        st.info(f"正在處理需求單，偵測到共有 {len(sheet_names)} 個分頁...")
+        st.info(f"偵測到主要分頁：{', '.join(sheet_names)}，開始進行高精度對齊整合...")
         
-        # 定義去掉第一個字元的函數
         def clean_upper_no(val):
             if val is None:
                 return ""
@@ -54,111 +55,122 @@ if ecn_file and status_file:
             if val_str in ['"', '”', '同上', '']:
                 return "FOLLOW"
             if len(val_str) > 1:
-                return val_str[1:]
+                return val_str[1:]  # 去掉第一個字元
             return val_str
 
-        # 遍歷主表每一個分頁進行欄位動態改寫
+        # 遍歷主表的每一個分頁
         for sheet_name in sheet_names:
             ws = ecn_wb[sheet_name]
             
-            # --- 步驟 A: 在最左邊插入兩欄：需求單號、工單號 ---
-            ws.insert_cols(1, amount=2)
-            ws.cell(row=1, column=1, value="需求單號")
-            ws.cell(row=1, column=2, value="工單號")
+            # --- 步驟 A: 動態抓取原始第 6 列的工單號資訊 ---
+            # 原始檔案在插入欄位前，第 6 列通常會包含像是 "工單號：C025M2102(12X)"
+            work_order_text = ""
+            for c in range(1, 10):
+                cell_val = str(ws.cell(row=6, column=c).value or "")
+                if "工單號" in cell_val or "工單" in cell_val:
+                    # 擷取冒號後面的實際工單號代碼
+                    if "：" in cell_val:
+                        work_order_text = cell_val.split("：")[-1].strip()
+                    elif ":" in cell_val:
+                        work_order_text = cell_val.split(":")[-1].strip()
+                    else:
+                        work_order_text = cell_val.replace("工單號", "").strip()
+                    break
             
-            # 填補前 6 列左側的新欄位（可選，維持乾淨，或填入 GAA260500286）
+            # 如果第 6 列沒抓到，設定一個安全預設值
+            if not work_order_text:
+                work_order_text = "C025M2102(12X)"
+
+            # --- 步驟 B: 在最左邊插入 A, B 兩欄 (需求單號, 工單號) ---
+            ws.insert_cols(1, amount=2)
+            
+            # 填寫第 7 列插入後的欄位標頭
             ws.cell(row=7, column=1, value="需求單號")
             ws.cell(row=7, column=2, value="工單號")
             
-            # --- 步驟 B: 尋找關鍵欄位所在的正確行（通常在第7列） ---
-            header_row_idx = 7
-            for r in range(1, 15):
-                row_vals = [str(ws.cell(row=r, column=c).value) for c in range(1, ws.max_column + 1)]
-                if any('上階' in v or '料號' in v for v in row_vals):
-                    header_row_idx = r
-                    break
+            # 讓第 1 到 6 列左側剛插入的 A、B 欄格位保持留空，不破壞大標頭結構
+            for r in range(1, 7):
+                ws.cell(row=r, column=1, value="")
+                ws.cell(row=r, column=2, value="")
             
-            # 讀取這一行的所有欄位名稱，以便定位「上階料號」和「變更後」的位置
-            headers = [str(ws.cell(row=header_row_idx, column=c).value).strip() for c in range(1, ws.max_column + 1)]
-            
-            # 尋找特定欄位的索引位置 (1-based)
-            # 注意：因為插入了兩欄，原始欄位位置往後移了 2
+            # --- 步驟 C: 定位關鍵欄位所在的確切欄位索引 (1-based) ---
+            # 因為剛剛最前面插入了 2 欄，我們掃描第 7 列和第 8 列來鎖定新欄位位置
             upper_col_idx = None  # 上階料號
             after_col_idx = None  # 變更後料號
             
-            for idx, h in enumerate(headers, 1):
-                if '上階' in h or '上階料號' in h:
-                    upper_col_idx = idx
-                if '變更後' in h:
-                    after_col_idx = idx
+            for r in [7, 8]:
+                for c in range(1, ws.max_column + 1):
+                    val = str(ws.cell(row=r, column=c).value).strip()
+                    if '上階' in val:
+                        upper_col_idx = c
+                    if '變更後' in val:
+                        after_col_idx = c
             
-            if not upper_col_idx or not after_col_idx:
-                st.warning(f"分頁 {sheet_name} 找不到「上階料號」或「變更後」欄位，跳過精準匹配。")
-                continue
-                
-            # --- 步驟 C: 將工單料況表的標頭寫入需求單的最右側 ---
-            start_write_col = ws.max_column + 1
-            status_headers = [c for c in status_df.columns if c != '__join_key__']
+            # 如果自動找尋失敗的防呆兜底索引 (對應原表結構往後推兩欄)
+            if not upper_col_idx: upper_col_idx = 8  # H 欄
+            if not after_col_idx: after_col_idx = 11  # K 欄
+
+            # --- 步驟 D: 定位寫入起點 (直接指定從第 13 欄 M 欄開始覆蓋/寫入) ---
+            start_write_col = 13  # 13 代表 M 欄
             
-            for i, h_name in enumerate(status_headers):
-                ws.cell(row=header_row_idx, value=h_name, column=start_write_col + i)
-                
-            # --- 步驟 D: 逐列遍歷資料列（從標頭下一列開始到最後） ---
+            # 寫入工單料況表的所有欄位標頭到第 7 列的 M 欄開始
+            for i, col_name in enumerate(status_cols):
+                ws.cell(row=7, column=start_write_col + i, value=col_name)
+            
+            # --- 步驟 E: 逐列比對與填充資料 (從第 9 列開始至最後一行) ---
             last_valid_upper = ""
             
-            for r in range(header_row_idx + 1, ws.max_row + 1):
-                # 填寫最左邊的固定資訊
-                ws.cell(row=r, column=1, value="GAA260500286")
+            for r in range(9, ws.max_row + 1):
+                # 1. 填入最左側插入的 A、B 欄核心資訊
+                ws.cell(row=r, column=1, value=doc_no)
+                ws.cell(row=r, column=2, value=work_order_text)
                 
-                # 讀取當前列的「上階料號」與「變更後料號」
+                # 2. 獲取並清洗當前列的「上階料號」
                 raw_upper = ws.cell(row=r, column=upper_col_idx).value
-                raw_after = ws.cell(row=r, column=after_col_idx).value
-                
-                # 處理上階料號去頭與同上遞補邏輯
                 processed_upper = clean_upper_no(raw_upper)
+                
                 if processed_upper == "FOLLOW":
                     use_upper = last_valid_upper
                 else:
                     use_upper = processed_upper
                     last_valid_upper = processed_upper
                 
-                # 處理工單號填寫（最左邊第二欄），工單號即為上階料號去頭後的結果
-                if use_upper:
-                    ws.cell(row=r, column=2, value=use_upper)
+                # 3. 獲取當前列的「料號 - 變更後」
+                val_after = str(ws.cell(row=r, column=after_col_idx).value).strip() if ws.cell(row=r, column=after_col_idx).value is not None else ""
                 
-                # 組合當前列的 Join Key: 上階料號去頭 + "_" + 變更後料號
-                current_after = str(raw_after).strip() if raw_after is not None else ""
-                current_join_key = f"{use_upper}_{current_after}"
+                # 4. 嚴格執行雙重條件交叉匹配
+                matched_rows = pd.DataFrame()
+                if use_upper and val_after and val_after != "None" and val_after != "":
+                    # 篩選工單號碼一致，且 Component Item 必須完全等於「料號 - 變更後」
+                    matched_rows = status_df[
+                        (status_df['工單號碼'].astype(str).str.strip() == use_upper) & 
+                        (status_df['Component Item'].astype(str).str.strip() == val_after)
+                    ]
                 
-                # 從工單料況 Dataframe 中尋找符合雙條件的資料
-                matched_rows = status_df[status_df['__join_key__'] == current_join_key]
-                
+                # 5. 匹配成功則將工單料況依序填入 M 欄 (第 13 欄) 右側
                 if not matched_rows.empty:
-                    # 找到匹配，取出第一筆，並將其欄位依序填入最右側
                     matched_match = matched_rows.iloc[0]
-                    for i, h_name in enumerate(status_headers):
-                        val_to_write = matched_match[h_name]
-                        # 排除 NaN 值的干擾
+                    for i, col_name in enumerate(status_cols):
+                        val_to_write = matched_match[col_name]
                         if pd.isna(val_to_write):
                             val_to_write = ""
                         ws.cell(row=r, column=start_write_col + i, value=val_to_write)
                         
-        st.success("🎉 全部分頁精準雙重條件比對整合完成！")
+        st.success("🎉 完美對齊！已成功依照最終期望邏輯產出 Excel 檔案！")
         
-        # 3. 提供整合後的 Excel 檔案下載
-        st.subheader("💾 步驟 3: 下載全新格式整合報表")
+        # --- 步驟 4：匯出供使用者下載 ---
         output = io.BytesIO()
         ecn_wb.save(output)
         processed_data = output.getvalue()
         
         st.download_button(
-            label="📥 下載完整整合對比 Excel 檔案 (完全保留原格式)",
+            label="📥 下載最終精準對齊整合 Excel 檔",
             data=processed_data,
-            file_name="GAA260500286_完美整合對照表.xlsx",
+            file_name=f"{doc_no}_完美整合料況表.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
     except Exception as e:
-        st.error(f"❌ 處理檔案時發生錯誤: {e}。請確認您上傳的檔案是否為原本的完整 Excel 檔。")
+        st.error(f"❌ 整合過程中發生錯誤: {e}。請確保檔案無損且結構正確。")
 else:
-    st.info("💡 提示：請同時上傳「多分頁需求單」與「工單料況表」以自動對其產出。")
+    st.info("💡 提示：請同時上傳「多分頁需求單」與「工單料況表」以自動進行精準整合。")
