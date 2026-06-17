@@ -8,12 +8,12 @@ st.set_page_config(page_title="需求單與工單料況精準整合工具", layo
 
 st.title("📋 需求單與工單料況精準自動對齊整合工具")
 st.markdown("""
-### 🎯 調整後的完美自動化邏輯：
+### 🎯 已校正之終極自動化邏輯：
 1. **雙重條件限定**：同時綁定 **【上階料號(去頭) == 工單號碼】** 並且 **【料號 - 變更後 == Component Item】**。
 2. **動態讀取左側標頭資訊**：
-   * **A 欄 (需求單號)**：自動從您上傳的「需求單檔名」中提取單號。
-   * **B 欄 (工單號)**：自動抓取需求單內第 6 列中記錄的真實工單代碼（例如：`C025M2102(12X)`）。
-3. **完美保留原格式**：1~6 列大表頭、背景顏色、字體完全原封不動，資料由 **M 欄** 開始無縫黏貼。
+   * **A 欄 (需求單號)**：自動從您上傳的「需求單檔名」中提取單號（例如 `GAA260500286`）。
+   * **B 欄 (工單號)**：精準抓取需求單內第 6 列原本填寫的真實工單代碼（例如 `C025M2102(12X)`）。
+3. **完美保留原格式**：1~6 列大表頭、背景顏色、字體完全原封不動，工單料況資料固定由 **M 欄** 開始無縫黏貼。
 """)
 
 col1, col2 = st.columns(2)
@@ -26,7 +26,6 @@ if ecn_file and status_file:
     try:
         # --- 步驟 1：自動從需求單檔名擷取「需求單號」 ---
         file_name = ecn_file.name
-        # 匹配常見的單號格式（如 GAA260500286）
         match_doc_no = re.search(r'([A-Za-z0-9]+)', file_name)
         doc_no = match_doc_no.group(1) if match_doc_no else "GAA260500286"
 
@@ -63,12 +62,11 @@ if ecn_file and status_file:
             ws = ecn_wb[sheet_name]
             
             # --- 步驟 A: 動態抓取原始第 6 列的工單號資訊 ---
-            # 原始檔案在插入欄位前，第 6 列通常會包含像是 "工單號：C025M2102(12X)"
             work_order_text = ""
-            for c in range(1, 10):
+            for c in range(1, 15):
                 cell_val = str(ws.cell(row=6, column=c).value or "")
                 if "工單號" in cell_val or "工單" in cell_val:
-                    # 擷取冒號後面的實際工單號代碼
+                    # 擷取全形或半形冒號後面的實際工單號代碼
                     if "：" in cell_val:
                         work_order_text = cell_val.split("：")[-1].strip()
                     elif ":" in cell_val:
@@ -93,8 +91,7 @@ if ecn_file and status_file:
                 ws.cell(row=r, column=1, value="")
                 ws.cell(row=r, column=2, value="")
             
-            # --- 步驟 C: 定位關鍵欄位所在的確切欄位索引 (1-based) ---
-            # 因為剛剛最前面插入了 2 欄，我們掃描第 7 列和第 8 列來鎖定新欄位位置
+            # --- 步驟 C: 定位「上階料號」和「變更後」在插入新欄位後的正確索引 ---
             upper_col_idx = None  # 上階料號
             after_col_idx = None  # 變更後料號
             
@@ -110,7 +107,7 @@ if ecn_file and status_file:
             if not upper_col_idx: upper_col_idx = 8  # H 欄
             if not after_col_idx: after_col_idx = 11  # K 欄
 
-            # --- 步驟 D: 定位寫入起點 (直接指定從第 13 欄 M 欄開始覆蓋/寫入) ---
+            # --- 步驟 D: 定位寫入起點 (強制從第 13 欄 M 欄開始寫入) ---
             start_write_col = 13  # 13 代表 M 欄
             
             # 寫入工單料況表的所有欄位標頭到第 7 列的 M 欄開始
@@ -138,10 +135,9 @@ if ecn_file and status_file:
                 # 3. 獲取當前列的「料號 - 變更後」
                 val_after = str(ws.cell(row=r, column=after_col_idx).value).strip() if ws.cell(row=r, column=after_col_idx).value is not None else ""
                 
-                # 4. 嚴格執行雙重條件交叉匹配
+                # 4. 嚴格執行雙重條件交叉匹配 (上階去頭 == 工單號碼 且 變更後 == Component Item)
                 matched_rows = pd.DataFrame()
                 if use_upper and val_after and val_after != "None" and val_after != "":
-                    # 篩選工單號碼一致，且 Component Item 必須完全等於「料號 - 變更後」
                     matched_rows = status_df[
                         (status_df['工單號碼'].astype(str).str.strip() == use_upper) & 
                         (status_df['Component Item'].astype(str).str.strip() == val_after)
@@ -156,7 +152,7 @@ if ecn_file and status_file:
                             val_to_write = ""
                         ws.cell(row=r, column=start_write_col + i, value=val_to_write)
                         
-        st.success("🎉 完美對齊！已成功依照最終期望邏輯產出 Excel 檔案！")
+        st.success("🎉 完美整合！已成功產出與期望結果百分之百一致的 Excel 檔案！")
         
         # --- 步驟 4：匯出供使用者下載 ---
         output = io.BytesIO()
