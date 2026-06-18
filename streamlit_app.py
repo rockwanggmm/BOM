@@ -3,15 +3,16 @@ import pandas as pd
 import io
 import openpyxl
 import re
+from datetime import datetime, date
 
 st.set_page_config(page_title="跨表大融合整合對齊工具", layout="wide")
 
 st.title("📋 多分頁需求單「單一頁面全整合」與工單料況對齊工具")
 st.markdown("""
-### 🎯 最終校正版自動化邏輯（內建合併欄位與空行雙防呆）：
+### 🎯 最終校正版自動化邏輯（內建日期格式防護）：
 1. **全單一頁面融合**：僅在第一個分頁插入 A、B 欄並從 **P 欄 (第 16 欄)** 黏貼料況。其餘所有分頁的數據將自動垂直向下追加到第一頁尾端。
-2. **智慧相容合併欄位**：完美破解第 7、8 列因合併欄位導致後續分頁（如 `FDC (2)`）找不到標頭的問題。
-3. **自動定位標頭**：工單料況表若上方有空行或大標題，程式會自動跳過並精準識別，無須手動刪除空行！
+2. **日期格式智能修復**：自動攔截並將 Excel 的 `46051` 等序列號或時間物件，精準還原為漂亮的 `YYYY-MM-DD` 日期格式。
+3. **智慧相容合併欄位**：完美破解第 7、8 列因合併欄位導致後續分頁找不到標頭的問題。
 """)
 
 col1, col2 = st.columns(2)
@@ -77,6 +78,36 @@ if ecn_file and status_file:
                 return val_str[1:]
             return val_str
 
+        # 🚀 新增安全寫入函式：專門處理與固定 Excel 的日期格式
+        def safe_write_cell(cell, value, col_name=""):
+            if pd.isna(value) or value is None:
+                cell.value = ""
+                return
+            
+            # 檢查是否為日期相關欄位
+            is_date_col = "日期" in str(col_name) or "Date" in str(col_name)
+            
+            # 狀況 A：如果值本來就是時間/日期物件
+            if isinstance(value, (datetime, date, pd.Timestamp)):
+                cell.value = value
+                cell.number_format = 'yyyy-mm-dd'
+                return
+                
+            # 狀況 B：如果是日期欄位，但被 pandas 轉成了 46051 這樣的序列號數字
+            if is_date_col and str(value).replace('.0', '').isdigit():
+                try:
+                    # 換算 Excel 序列號回 Python 日期物件
+                    serial_num = int(float(value))
+                    parsed_date = pd.to_datetime(serial_num, unit='D', origin='1899-12-30')
+                    cell.value = parsed_date
+                    cell.number_format = 'yyyy-mm-dd'
+                    return
+                except Exception:
+                    pass
+            
+            # 狀況 C：其餘一般資料，正常轉字串或數值寫入
+            cell.value = value
+
         # 鎖定第一個分頁作為整合大表
         main_sheet_name = sheet_names[0]
         main_ws = ecn_wb[main_sheet_name]
@@ -121,33 +152,27 @@ if ecn_file and status_file:
             else:
                 is_multi_order = True
                 
-            # 🚨 破解合併欄位：十字地毯式搜索 (同時看第 7 列與第 8 列)
+            # 破解合併欄位：十字地毯式搜索
             upper_col_idx = None
             after_col_idx = None
             
             for c in range(1, ws.max_column + 1):
-                # 同時抓取第 7 列與第 8 列的值進行模糊比對
                 val_r7 = str(ws.cell(row=7, column=c).value or "").strip()
                 val_r8 = str(ws.cell(row=8, column=c).value or "").strip()
                 combined_text = val_r7 + val_r8
                 
                 if '上階' in combined_text:
-                    # 如果是第一頁，因為前面已經插了兩欄，欄位索引直接使用；其餘分頁則記錄插入兩欄後的預期位置
                     upper_col_idx = c if s_idx == 0 else c + 2
                 if '變更後' in combined_text:
                     after_col_idx = c if s_idx == 0 else c + 2
 
-            # 💡 安全兜底：如果真的連第 7、8 列都沒偵測到，使用預設的黃金索引
-            if upper_col_idx is None:
-                upper_col_idx = 8  # 對應插入後的 H 欄
-            if after_col_idx is None:
-                after_col_idx = 11 # 對應插入後的 K 欄
+            if upper_col_idx is None: upper_col_idx = 8
+            if after_col_idx is None: after_col_idx = 11
 
             max_r = ws.max_row
             last_valid_upper = ""
             
             for r in range(9, max_r + 1):
-                # 計算在當前處理分頁中的實際讀取索引
                 read_upper_idx = upper_col_idx if s_idx == 0 else upper_col_idx - 2
                 read_after_idx = after_col_idx if s_idx == 0 else after_col_idx - 2
                 
@@ -174,10 +199,14 @@ if ecn_file and status_file:
                 else:
                     final_work_order = work_order_text
                 
+                # 若不是第一個分頁，搬移原始數據至第一頁尾端（搬移時同步保留原分頁可能有的日期/格式物件）
                 if s_idx > 0:
                     for col_c in range(1, 14): 
-                        val_to_move = ws.cell(row=r, column=col_c).value
-                        main_ws.cell(row=current_main_row, column=col_c + 2, value=val_to_move)
+                        orig_cell = ws.cell(row=r, column=col_c)
+                        target_cell = main_ws.cell(row=current_main_row, column=col_c + 2, value=orig_cell.value)
+                        # 如果原單據內該欄帶有日期格式，同步將格式複製過去
+                        if orig_cell.number_format and orig_cell.number_format != 'General':
+                            target_cell.number_format = orig_cell.number_format
                 
                 main_ws.cell(row=current_main_row, column=1, value=doc_no)
                 main_ws.cell(row=current_main_row, column=2, value=final_work_order)
@@ -194,9 +223,9 @@ if ecn_file and status_file:
                     matched_match = matched_rows.iloc[0]
                     for i, col_name in enumerate(status_cols):
                         val_to_write = matched_match[col_name]
-                        if pd.isna(val_to_write):
-                            val_to_write = ""
-                        main_ws.cell(row=current_main_row, column=start_write_col + i, value=val_to_write)
+                        target_cell = main_ws.cell(row=current_main_row, column=start_write_col + i)
+                        # 🚀 呼叫安全寫入器，確保不管是 46051 還是 Datetime，都能完美輸出為 yyyy-mm-dd
+                        safe_write_cell(target_cell, val_to_write, col_name=col_name)
                 
                 if s_idx == 0:
                     current_main_row = r + 1
@@ -206,7 +235,7 @@ if ecn_file and status_file:
         for sheet_name in sheet_names[1:]:
             del ecn_wb[sheet_name]
             
-        st.success(f"🎉 跨活頁大融合成功！已完美攻克合併欄位限制，全數整合成單一工作表！")
+        st.success(f"🎉 跨活頁大融合成功！已將所有分頁整合成單一工作表，且日期格式已完美修正！")
         
         output = io.BytesIO()
         ecn_wb.save(output)
